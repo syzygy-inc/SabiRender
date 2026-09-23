@@ -91,10 +91,7 @@ pub fn bounds(list: &DisplayList) -> Option<Bounds> {
             }
             Item::Glyphs { run, ctm, .. } => {
                 for g in &run.glyphs {
-                    let m = Matrix::scale(run.scale, run.scale)
-                        .then(&Matrix::translate(g.x, g.y))
-                        .then(ctm);
-                    include_path(&g.outline, &m, 0.0);
+                    include_path(&g.outline, &g.transform.then(ctm), 0.0);
                 }
             }
             Item::Image { ctm, .. } => include_path(&Path::rect(0.0, 0.0, 1.0, 1.0), ctm, 0.0),
@@ -180,6 +177,15 @@ fn matrix(m: &Matrix, p: usize) -> String {
     )
 }
 
+/// 恒等でなければ `transform` 属性
+fn transform_attr(m: &Matrix, p: usize) -> String {
+    if *m == Matrix::IDENTITY {
+        String::new()
+    } else {
+        format!(" transform=\"{}\"", matrix(m, p))
+    }
+}
+
 fn stroke_attrs(style: &StrokeStyle, p: usize) -> String {
     let mut s = format!(" stroke-width=\"{}\"", num(style.width, p));
     match style.cap {
@@ -261,9 +267,9 @@ pub fn to_svg(list: &DisplayList, opts: &SvgOptions) -> String {
             } => {
                 write!(
                     out,
-                    "<path d=\"{}\" transform=\"{}\" fill=\"{}\"",
+                    "<path d=\"{}\"{} fill=\"{}\"",
                     path_d(path, p),
-                    matrix(ctm, p),
+                    transform_attr(ctm, p),
                     color(c)
                 )
                 .unwrap();
@@ -284,9 +290,9 @@ pub fn to_svg(list: &DisplayList, opts: &SvgOptions) -> String {
             } => {
                 write!(
                     out,
-                    "<path d=\"{}\" transform=\"{}\" fill=\"none\" stroke=\"{}\"{}",
+                    "<path d=\"{}\"{} fill=\"none\" stroke=\"{}\"{}",
                     path_d(path, p),
-                    matrix(ctm, p),
+                    transform_attr(ctm, p),
                     color(c),
                     stroke_attrs(style, p)
                 )
@@ -300,9 +306,9 @@ pub fn to_svg(list: &DisplayList, opts: &SvgOptions) -> String {
                 clip_id += 1;
                 write!(
                     out,
-                    "<clipPath id=\"c{clip_id}\"><path d=\"{}\" transform=\"{}\"",
+                    "<clipPath id=\"c{clip_id}\"><path d=\"{}\"{}",
                     path_d(path, p),
-                    matrix(ctm, p)
+                    transform_attr(ctm, p)
                 )
                 .unwrap();
                 if *rule == FillRule::EvenOdd {
@@ -323,13 +329,7 @@ pub fn to_svg(list: &DisplayList, opts: &SvgOptions) -> String {
                 color: c,
                 alpha,
             } => {
-                write!(
-                    out,
-                    "<g transform=\"{}\" fill=\"{}\"",
-                    matrix(ctm, p),
-                    color(c)
-                )
-                .unwrap();
+                write!(out, "<g{} fill=\"{}\"", transform_attr(ctm, p), color(c)).unwrap();
                 if *alpha < 1.0 {
                     write!(out, " fill-opacity=\"{}\"", num(*alpha, p)).unwrap();
                 }
@@ -338,12 +338,11 @@ pub fn to_svg(list: &DisplayList, opts: &SvgOptions) -> String {
                     if g.outline.is_empty() {
                         continue;
                     }
-                    let m = Matrix::scale(run.scale, run.scale).then(&Matrix::translate(g.x, g.y));
                     write!(
                         out,
-                        "<path d=\"{}\" transform=\"{}\"/>",
+                        "<path d=\"{}\"{}/>",
                         path_d(&g.outline, p),
-                        matrix(&m, p)
+                        transform_attr(&g.transform, p)
                     )
                     .unwrap();
                 }
@@ -367,6 +366,7 @@ pub fn to_svg(list: &DisplayList, opts: &SvgOptions) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sabirender_display::{GlyphRun, PlacedGlyph};
 
     #[test]
     fn writes_paths_clips_and_glyphs_with_flipped_y() {
@@ -398,6 +398,17 @@ mod tests {
                     color: Color::BLACK,
                     alpha: 1.0,
                 },
+                Item::Glyphs {
+                    run: GlyphRun {
+                        glyphs: vec![PlacedGlyph {
+                            outline: Path::rect(0.0, 0.0, 500.0, 700.0),
+                            transform: Matrix::scale(0.01, 0.01).then(&Matrix::translate(3.0, 4.0)),
+                        }],
+                    },
+                    ctm: Matrix::IDENTITY,
+                    color: Color::BLACK,
+                    alpha: 1.0,
+                },
                 Item::ClipPop,
             ],
         };
@@ -414,6 +425,7 @@ mod tests {
         assert!(svg.contains("stroke-linecap=\"round\""));
         assert!(svg.contains("stroke-dasharray=\"2 1\""));
         assert!(svg.contains("transform=\"matrix(2 0 0 1 0 0)\""));
+        assert!(svg.contains("transform=\"matrix(0.01 0 0 0.01 3 4)\""));
         assert!(svg.contains("matrix(1 0 0 -1 "));
         assert_eq!(svg.matches("<g").count(), svg.matches("</g>").count());
     }
@@ -437,13 +449,12 @@ mod tests {
                     alpha: 1.0,
                 },
                 Item::Glyphs {
-                    run: sabirender_display::GlyphRun {
-                        glyphs: vec![sabirender_display::PlacedGlyph {
+                    run: GlyphRun {
+                        glyphs: vec![PlacedGlyph {
                             outline: Path::rect(0.0, 0.0, 500.0, 700.0),
-                            x: 30.0,
-                            y: 0.0,
+                            transform: Matrix::scale(0.01, 0.01)
+                                .then(&Matrix::translate(30.0, 0.0)),
                         }],
-                        scale: 0.01,
                     },
                     ctm: Matrix::IDENTITY,
                     color: Color::BLACK,

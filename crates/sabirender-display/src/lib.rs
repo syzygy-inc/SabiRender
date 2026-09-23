@@ -1,12 +1,13 @@
 //! 装置非依存の描画命令列（display list）。
 //!
-//! SabiRender の入口（SabiDVI、将来の SabiPDF）はページをこの列に変換し、後端（CPU 参照ラスタライザ、GPU）はこの列だけを読む。
+//! SabiRender の入口（SabiDVI、将来の SabiPDF）はページをこの列に変換し、後端（CPU 参照ラスタライザ、SVG）はこの列だけを読む。
 //! 図形モデルは PDF のもの（ISO 32000-1 §8）に揃える。3D は扱わない（Sabi 系列は 2D テクスチャの領域に留める）。
 //!
 //! 座標: すべての項目は「ページ空間」への変換行列 `ctm` を持ち、経路はその手前の利用者空間で表す。
-//! 塗りは経路を変換してから塗ればよいが、線は利用者空間で太らせてから変換しなければならない
-//! （非等方な拡大で線幅が向きにより変わる）ため、経路と行列を分けて持つ。
-//! ページ空間の単位は bp（1/72 in）、y は上向き。ラスタライザが装置空間へ写す。
+//! 塗りとクリップの経路は評価器が構築時の CTM で変換済みなので `ctm` は恒等になる。
+//! 線は利用者空間で太らせてから変換しなければならない（非等方な拡大で線幅が向きにより変わる）ため、
+//! 塗り時点の CTM と、その利用者空間に戻した経路を持つ。
+//! ページ空間の単位は bp（1/72 in）、y は上向き。後端が装置空間へ写す。
 
 /// 経路の要素。座標は利用者空間
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -224,21 +225,21 @@ impl Default for StrokeStyle {
 /// 字形の参照。輪郭の解決は入口側（SabiFace）に任せ、後端には輪郭を渡す
 #[derive(Debug, Clone, PartialEq)]
 pub struct GlyphRun {
-    /// 字形ごとの輪郭（字形単位）と、その原点の利用者空間座標
     pub glyphs: Vec<PlacedGlyph>,
-    /// 字形単位から利用者空間への拡大率（例: 1000 単位/em のフォントを 10bp で使うなら 0.01）
-    pub scale: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlacedGlyph {
+    /// 輪郭（字形単位）
     pub outline: Path,
-    pub x: f64,
-    pub y: f64,
+    /// 字形単位から項目の利用者空間への変換（FontMatrix、傾斜や横拡大、大きさ、位置をすべて含む）。
+    /// ページ空間へは `transform.then(&ctm)`
+    pub transform: Matrix,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
+    /// 塗り。経路は構築時の CTM で変換済みなので、通常 `ctm` は恒等
     Fill {
         path: Path,
         ctm: Matrix,
@@ -246,6 +247,7 @@ pub enum Item {
         color: Color,
         alpha: f64,
     },
+    /// 線。経路は `ctm` の利用者空間で持ち、太らせてから `ctm` で変換する
     Stroke {
         path: Path,
         ctm: Matrix,

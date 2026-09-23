@@ -6,6 +6,9 @@
 //! `Unsupported` として記録する。TeX の文字は DVI 側で置かれるので、入口が SabiDVI である限りテキスト演算子は
 //! PGF の出力に現れない。
 //!
+//! 経路の各点は、その点を加えた時点の CTM で変換してページ空間に保持する（§8.5.2「経路構築中に `cm` が
+//! 来れば、それ以降の点だけが新しい行列で変換される」）。線は塗り時点の CTM の利用者空間に戻して太らせる。
+//!
 //! 座標は「基準行列」（構築時に与える。DVI の現在位置をページ空間に写すもの）から始まる。
 
 pub mod lexer;
@@ -81,10 +84,11 @@ impl Resources for NoResources {
 pub struct Evaluator<'r> {
     pub state: GraphicsState,
     stack: Vec<GraphicsState>,
+    /// 構築中の経路（ページ空間）
     path: Path,
     /// 直前の `W` / `W*`（塗り演算子の後で適用する）
     pending_clip: Option<FillRule>,
-    /// 現在の点と部分経路の始点（利用者空間）
+    /// 現在の点と部分経路の始点（ページ空間）
     current: (f64, f64),
     start: (f64, f64),
     resources: &'r dyn Resources,
@@ -164,6 +168,7 @@ impl<'r> Evaluator<'r> {
             }
             v
         };
+        let ctm = self.state.ctm;
         match op {
             // --- 図形状態 ---
             "q" => {
@@ -245,43 +250,52 @@ impl<'r> Evaluator<'r> {
                     }
                 }
             }
-            // --- 経路構築 ---
+            // --- 経路構築（点はその時点の CTM でページ空間へ） ---
             "m" => {
                 let v = tail(2);
-                self.current = (v[0], v[1]);
-                self.start = self.current;
-                self.path.segments.push(Segment::MoveTo(v[0], v[1]));
+                let p = ctm.apply(v[0], v[1]);
+                self.current = p;
+                self.start = p;
+                self.path.segments.push(Segment::MoveTo(p.0, p.1));
             }
             "l" => {
                 let v = tail(2);
                 self.ensure_open();
-                self.current = (v[0], v[1]);
-                self.path.segments.push(Segment::LineTo(v[0], v[1]));
+                let p = ctm.apply(v[0], v[1]);
+                self.current = p;
+                self.path.segments.push(Segment::LineTo(p.0, p.1));
             }
             "c" => {
                 let v = tail(6);
                 self.ensure_open();
-                self.current = (v[4], v[5]);
+                let (a, b) = ctm.apply(v[0], v[1]);
+                let (c, d) = ctm.apply(v[2], v[3]);
+                let p = ctm.apply(v[4], v[5]);
+                self.current = p;
                 self.path
                     .segments
-                    .push(Segment::CurveTo(v[0], v[1], v[2], v[3], v[4], v[5]));
+                    .push(Segment::CurveTo(a, b, c, d, p.0, p.1));
             }
             "v" => {
                 let v = tail(4);
                 self.ensure_open();
                 let (x0, y0) = self.current;
-                self.current = (v[2], v[3]);
+                let (c, d) = ctm.apply(v[0], v[1]);
+                let p = ctm.apply(v[2], v[3]);
+                self.current = p;
                 self.path
                     .segments
-                    .push(Segment::CurveTo(x0, y0, v[0], v[1], v[2], v[3]));
+                    .push(Segment::CurveTo(x0, y0, c, d, p.0, p.1));
             }
             "y" => {
                 let v = tail(4);
                 self.ensure_open();
-                self.current = (v[2], v[3]);
+                let (a, b) = ctm.apply(v[0], v[1]);
+                let p = ctm.apply(v[2], v[3]);
+                self.current = p;
                 self.path
                     .segments
-                    .push(Segment::CurveTo(v[0], v[1], v[2], v[3], v[2], v[3]));
+                    .push(Segment::CurveTo(a, b, p.0, p.1, p.0, p.1));
             }
             "h" => {
                 if !self.path.segments.is_empty()
@@ -295,9 +309,10 @@ impl<'r> Evaluator<'r> {
                 let v = tail(4);
                 self.path
                     .segments
-                    .extend(Path::rect(v[0], v[1], v[2], v[3]).segments);
-                self.current = (v[0], v[1]);
-                self.start = self.current;
+                    .extend(Path::rect(v[0], v[1], v[2], v[3]).transform(&ctm).segments);
+                let p = ctm.apply(v[0], v[1]);
+                self.current = p;
+                self.start = p;
             }
             // --- 塗り ---
             "S" => self.paint(false, false, true, FillRule::NonZero, out),
@@ -402,16 +417,21 @@ impl<'r> Evaluator<'r> {
         if fill && !path.is_empty() {
             out.push(Item::Fill {
                 path: path.clone(),
-                ctm: self.state.ctm,
+                ctm: Matrix::IDENTITY,
                 rule,
                 color: self.state.fill_color,
                 alpha: self.state.fill_alpha,
             });
         }
         if stroke && !path.is_empty() {
+            // 線は塗り時点の CTM の利用者空間で太らせる。CTM が退化していれば太らせようがないのでページ空間のまま
+            let (path_user, ctm) = match self.state.ctm.invert() {
+                Some(inv) => (path.transform(&inv), self.state.ctm),
+                None => (path.clone(), Matrix::IDENTITY),
+            };
             out.push(Item::Stroke {
-                path: path.clone(),
-                ctm: self.state.ctm,
+                path: path_user,
+                ctm,
                 style: self.state.stroke_style.clone(),
                 color: self.state.stroke_color,
                 alpha: self.state.stroke_alpha,
@@ -421,7 +441,7 @@ impl<'r> Evaluator<'r> {
             // 空の経路によるクリップは全てを隠す
             out.push(Item::ClipPush {
                 path,
-                ctm: self.state.ctm,
+                ctm: Matrix::IDENTITY,
                 rule,
             });
             self.state.clip_depth += 1;
@@ -440,8 +460,9 @@ impl<'r> Evaluator<'r> {
         self.state.ctm = form.matrix.then(&self.state.ctm);
         let [x0, y0, x1, y1] = form.bbox;
         out.push(Item::ClipPush {
-            path: Path::rect(x0.min(x1), y0.min(y1), (x1 - x0).abs(), (y1 - y0).abs()),
-            ctm: self.state.ctm,
+            path: Path::rect(x0.min(x1), y0.min(y1), (x1 - x0).abs(), (y1 - y0).abs())
+                .transform(&self.state.ctm),
+            ctm: Matrix::IDENTITY,
             rule: FillRule::NonZero,
         });
         self.state.clip_depth += 1;
@@ -467,6 +488,25 @@ mod tests {
         ev.run(code.as_bytes(), &mut out);
         ev.finish(&mut out);
         out
+    }
+
+    /// 項目の経路をページ空間の点列にする
+    fn points(item: &Item) -> Vec<(f64, f64)> {
+        let (path, ctm) = match item {
+            Item::Fill { path, ctm, .. }
+            | Item::Stroke { path, ctm, .. }
+            | Item::ClipPush { path, ctm, .. } => (path, ctm),
+            _ => panic!("no path"),
+        };
+        path.transform(ctm)
+            .segments
+            .iter()
+            .filter_map(|s| match *s {
+                Segment::MoveTo(x, y) | Segment::LineTo(x, y) => Some((x, y)),
+                Segment::CurveTo(_, _, _, _, x, y) => Some((x, y)),
+                Segment::Close => None,
+            })
+            .collect()
     }
 
     #[test]
@@ -495,17 +535,54 @@ mod tests {
     #[test]
     fn cm_composes_and_q_restores() {
         let dl = eval("q 2 0 0 2 0 0 cm 1 0 0 1 5 5 cm 0 0 m 1 1 l S Q 0 0 m 1 1 l S");
-        let ctm0 = match &dl.items[0] {
-            Item::Stroke { ctm, .. } => *ctm,
+        // 先に平行移動 (5,5)、後に 2 倍: (0,0) → (10,10)、(1,1) → (12,12)
+        assert_eq!(points(&dl.items[0]), vec![(10.0, 10.0), (12.0, 12.0)]);
+        match &dl.items[0] {
+            Item::Stroke { ctm, path, .. } => {
+                assert_eq!(ctm.apply(0.0, 0.0), (10.0, 10.0));
+                // 線の経路は利用者空間のまま
+                assert_eq!(path.segments[0], Segment::MoveTo(0.0, 0.0));
+            }
             _ => unreachable!(),
-        };
-        // 先に平行移動 (5,5)、後に 2 倍: (0,0) → (10,10)
-        assert_eq!(ctm0.apply(0.0, 0.0), (10.0, 10.0));
-        let ctm1 = match &dl.items[1] {
-            Item::Stroke { ctm, .. } => *ctm,
+        }
+        match &dl.items[1] {
+            Item::Stroke { ctm, .. } => assert_eq!(*ctm, Matrix::IDENTITY),
             _ => unreachable!(),
-        };
-        assert_eq!(ctm1, Matrix::IDENTITY);
+        }
+    }
+
+    #[test]
+    fn cm_in_the_middle_of_a_path_moves_only_later_points() {
+        // §8.5.2: 経路の点は加えた時点の CTM で変換される
+        let dl = eval("10 10 m 1 0 0 1 100 0 cm 20 10 l S");
+        assert_eq!(points(&dl.items[0]), vec![(10.0, 10.0), (120.0, 10.0)]);
+        let dl = eval("0 0 m 2 0 0 2 0 0 cm 5 5 l 0.5 0 0 0.5 0 0 cm 20 20 l h f");
+        assert_eq!(
+            points(&dl.items[0]),
+            vec![(0.0, 0.0), (10.0, 10.0), (20.0, 20.0)]
+        );
+    }
+
+    #[test]
+    fn stroke_width_uses_the_ctm_at_painting_time() {
+        // 経路は拡大前に置き、線幅は拡大後の CTM で決まる
+        let dl = eval("2 w 0 0 m 10 0 l 3 0 0 3 0 0 cm S");
+        match &dl.items[0] {
+            Item::Stroke {
+                path, ctm, style, ..
+            } => {
+                assert_eq!(ctm.mean_scale(), 3.0);
+                assert_eq!(style.width, 2.0);
+                // 利用者空間の経路: (0,0)-(10,0) を 3 倍の空間へ戻したもの
+                let end = match path.segments[1] {
+                    Segment::LineTo(x, y) => (x, y),
+                    _ => unreachable!(),
+                };
+                assert!((end.0 - 10.0 / 3.0).abs() < 1e-12 && end.1.abs() < 1e-12);
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(points(&dl.items[0]), vec![(0.0, 0.0), (10.0, 0.0)]);
     }
 
     #[test]
@@ -588,13 +665,13 @@ mod tests {
             .collect();
         assert_eq!(fills.len(), 1);
         match fills[0] {
-            Item::Fill { ctm, alpha, .. } => {
-                assert_eq!(ctm.apply(1.0, 1.0), (12.0, 2.0));
-                assert_eq!(*alpha, 0.5);
-            }
+            Item::Fill { alpha, .. } => assert_eq!(*alpha, 0.5),
             _ => unreachable!(),
         }
+        // (1,1) は /Matrix で 2 倍、基準行列で +10: (12,2)
+        assert!(points(fills[0]).contains(&(12.0, 2.0)));
         assert!(matches!(out.items[0], Item::ClipPush { .. }));
+        assert!(points(&out.items[0]).contains(&(12.0, 2.0)));
         assert!(out.unsupported().next().is_none());
     }
 }

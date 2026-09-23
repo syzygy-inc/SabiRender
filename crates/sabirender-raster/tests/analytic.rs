@@ -319,3 +319,66 @@ fn page_to_device_flips_y_and_scales_by_dpi() {
     assert_eq!(m.apply(0.0, 100.0), (0.0, 0.0));
     assert_eq!(m.apply(10.0, 0.0), (20.0, 200.0));
 }
+
+#[test]
+fn identical_clips_do_not_thin_the_coverage() {
+    // 1×1 画素の左半分を塗る。同じ矩形のクリップを 0〜3 回重ねても被覆率は 0.5 のまま
+    for count in 0..=3 {
+        let p = Path::rect(0.0, 0.0, 0.5, 1.0);
+        let mut items = Vec::new();
+        for _ in 0..count {
+            items.push(Item::ClipPush {
+                path: p.clone(),
+                ctm: Matrix::IDENTITY,
+                rule: FillRule::NonZero,
+            });
+        }
+        items.push(fill(p, FillRule::NonZero));
+        let mut canvas = Canvas::new(1, 1);
+        render(&DisplayList { items }, &mut canvas, &Matrix::IDENTITY);
+        assert!(
+            (canvas.coverage_sum() - 0.5).abs() < 1e-9,
+            "clips {count}: {}",
+            canvas.coverage_sum()
+        );
+    }
+}
+
+#[test]
+fn clip_and_fill_that_do_not_overlap_inside_a_pixel_give_zero() {
+    // 左半分のクリップと右半分の塗り: 被覆率の積なら 0.25 になるが、交叉は空
+    let items = vec![
+        Item::ClipPush {
+            path: Path::rect(0.0, 0.0, 0.5, 1.0),
+            ctm: Matrix::IDENTITY,
+            rule: FillRule::NonZero,
+        },
+        fill(Path::rect(0.5, 0.0, 0.5, 1.0), FillRule::NonZero),
+    ];
+    let mut canvas = Canvas::new(1, 1);
+    render(&DisplayList { items }, &mut canvas, &Matrix::IDENTITY);
+    assert!(canvas.coverage_sum().abs() < 1e-9);
+}
+
+#[test]
+fn glyphs_are_placed_by_their_own_transform() {
+    // 1000 単位の正方形を 0.01 倍して (30, 20) に置く: 10×10 の塗り
+    let run = sabirender_display::GlyphRun {
+        glyphs: vec![sabirender_display::PlacedGlyph {
+            outline: Path::rect(0.0, 0.0, 1000.0, 1000.0),
+            transform: Matrix::scale(0.01, 0.01).then(&Matrix::translate(30.0, 20.0)),
+        }],
+    };
+    let items = vec![Item::Glyphs {
+        run,
+        ctm: Matrix::scale(2.0, 1.0),
+        color: Color::BLACK,
+        alpha: 1.0,
+    }];
+    let mut canvas = Canvas::new(200, 200);
+    render(&DisplayList { items }, &mut canvas, &Matrix::IDENTITY);
+    // ctm で x が 2 倍: 20×10
+    assert_area(canvas.coverage_sum(), 200.0, 1e-9, "glyph");
+    assert!(canvas.pixels[25 * 200 + 65][3] > 0.99);
+    assert!(canvas.pixels[25 * 200 + 55][3] < 0.01);
+}
