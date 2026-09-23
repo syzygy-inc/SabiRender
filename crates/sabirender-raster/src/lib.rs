@@ -11,6 +11,7 @@
 //! - 合成は source-over。色は sRGB 相当の 0..1 で保持し、出力時に 8 ビットへ丸める。
 
 pub mod flatten;
+pub mod png;
 pub mod stroke;
 
 use sabirender_display::{DisplayList, FillRule, Item, Matrix, Path};
