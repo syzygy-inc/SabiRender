@@ -19,3 +19,10 @@ version = "0.0.1"
 dependencies = [
  "sabirender-display",
 ]
+
+[[package]]
+name = "sabirender-svg"
+version = "0.0.1"
+dependencies = [
+ "sabirender-display",
+]

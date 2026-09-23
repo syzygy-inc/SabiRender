@@ -1,0 +1,10 @@
+[package]
+name = "sabirender-svg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SVG backend: writes a display list as an SVG document (paths, strokes, clips, glyph outlines)"
+
+[dependencies]
+sabirender-display = { path = "../sabirender-display" }

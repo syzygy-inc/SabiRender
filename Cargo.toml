@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sabirender-display", "crates/sabirender-content", "crates/sabirender-raster"]
+members = ["crates/sabirender-display", "crates/sabirender-content", "crates/sabirender-raster", "crates/sabirender-svg"]
 
 [workspace.package]
 version = "0.0.1"
