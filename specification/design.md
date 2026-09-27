@@ -69,6 +69,15 @@ ISO 32000-1 §8 の図形モデルに揃える。3D 向けの概念（深度、�
 - 後端は `page_to_device(page_height_bp, dpi)` でページ空間を画素座標（原点左上、y 下向き）へ写す。
 - 入口が DVI の位置（sp、y 下向き）から `pdf:code` の基準行列を作る。1 bp = 65536 × 72.27 / 72 sp。
 
+## 異常な数値と容量
+
+- 内容評価器: 非有限の被演算子を持つ演算子は実行せず `Item::Unsupported` の診断にする。stroke 時の CTM が特異なら診断を残し、
+  ページ空間で描く（黙って正常な描画に置き換えない）。フォームの再帰は深さ 16 まで。
+- ラスタライザ: 非有限の点を含む部分経路は折れ線化で丸ごと落とす（一部の線分だけ描いて形を変えない）。非有限・負の線幅、
+  miter limit、破線は描かず `RenderReport.skipped` に残す。曲線分割は深さ 16 で終端する。
+- キャンバス: `Canvas::try_new` が画素数の乗算あふれと上限 `MAX_PIXELS`（2^24）を確保前に検査する。
+- これらの検査は [cases.md](cases.md) の RENDER-CONTENT-NUMERIC / RENDER-NUMERIC / RENDER-CAPACITY に対応する。
+
 ## 今後
 
 - 画像（PNG / JPEG / PDF の `pdf:image`）の復号と描画。
