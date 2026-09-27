@@ -18,6 +18,12 @@ use sabirender_display::{
     Color, DisplayList, FillRule, Item, LineCap, LineJoin, Matrix, Path, Segment, StrokeStyle,
 };
 
+/// 予算（C-RESOURCE）。到達したら診断（`Item::Unsupported`、`budget:` で始まる）を残して打ち切り、
+/// 黙って正常な結果にしない。値は PGF の図に十分な大きさで、無限再帰・無限の経路を止めるためのもの
+pub const MAX_FORM_DEPTH: usize = 16;
+pub const MAX_PATH_SEGMENTS: usize = 1 << 20;
+pub const MAX_CLIP_DEPTH: usize = 256;
+
 /// 図形状態（§8.4）
 #[derive(Debug, Clone)]
 pub struct GraphicsState {
@@ -94,6 +100,10 @@ pub struct Evaluator<'r> {
     resources: &'r dyn Resources,
     /// フォーム XObject の入れ子の深さ（無限再帰の防止）
     depth: usize,
+    /// 構築中の経路に、特異な CTM の下で加えた点がある（塗り・クリップは何も描かない。診断を残す）
+    path_singular: bool,
+    /// 構築中の経路が `MAX_PATH_SEGMENTS` に達した（診断は一度だけ）
+    path_over_budget: bool,
 }
 
 impl<'r> Evaluator<'r> {
@@ -107,6 +117,8 @@ impl<'r> Evaluator<'r> {
             start: (0.0, 0.0),
             resources,
             depth: 0,
+            path_singular: false,
+            path_over_budget: false,
         }
     }
 
@@ -176,6 +188,22 @@ impl<'r> Evaluator<'r> {
             v
         };
         let ctm = self.state.ctm;
+        if matches!(op, "m" | "l" | "c" | "v" | "y" | "re") {
+            if ctm.determinant() == 0.0 {
+                self.path_singular = true;
+            }
+            if self.path.segments.len() >= MAX_PATH_SEGMENTS {
+                if !self.path_over_budget {
+                    self.path_over_budget = true;
+                    out.push(Item::Unsupported {
+                        what: format!(
+                            "budget: path exceeds {MAX_PATH_SEGMENTS} segments (the rest is dropped)"
+                        ),
+                    });
+                }
+                return;
+            }
+        }
         match op {
             // --- 図形状態 ---
             "q" => {
@@ -421,6 +449,14 @@ impl<'r> Evaluator<'r> {
             self.execute("h", &[], out);
         }
         let path = std::mem::take(&mut self.path);
+        let singular = std::mem::take(&mut self.path_singular);
+        self.path_over_budget = false;
+        if singular && (fill || self.pending_clip.is_some()) && !path.is_empty() {
+            out.push(Item::Unsupported {
+                what: "path built under a singular CTM (degenerate; fill and clip paint nothing)"
+                    .into(),
+            });
+        }
         if fill && !path.is_empty() {
             out.push(Item::Fill {
                 path: path.clone(),
@@ -451,20 +487,30 @@ impl<'r> Evaluator<'r> {
             });
         }
         if let Some(rule) = self.pending_clip.take() {
-            // 空の経路によるクリップは全てを隠す
-            out.push(Item::ClipPush {
-                path,
-                ctm: Matrix::IDENTITY,
-                rule,
-            });
-            self.state.clip_depth += 1;
+            let total =
+                self.state.clip_depth + self.stack.iter().map(|s| s.clip_depth).sum::<usize>();
+            if total >= MAX_CLIP_DEPTH {
+                out.push(Item::Unsupported {
+                    what: format!(
+                        "budget: clip nesting exceeds {MAX_CLIP_DEPTH} (this clip is ignored)"
+                    ),
+                });
+            } else {
+                // 空の経路によるクリップは全てを隠す
+                out.push(Item::ClipPush {
+                    path,
+                    ctm: Matrix::IDENTITY,
+                    rule,
+                });
+                self.state.clip_depth += 1;
+            }
         }
     }
 
     fn run_form(&mut self, form: &FormXObject, out: &mut DisplayList) {
-        if self.depth > 16 {
+        if self.depth >= MAX_FORM_DEPTH {
             out.push(Item::Unsupported {
-                what: "form XObject nested too deeply".into(),
+                what: format!("budget: form XObject nested deeper than {MAX_FORM_DEPTH}"),
             });
             return;
         }
@@ -713,5 +759,61 @@ mod tests {
         assert!(matches!(out.items[0], Item::ClipPush { .. }));
         assert!(points(&out.items[0]).contains(&(12.0, 2.0)));
         assert!(out.unsupported().next().is_none());
+    }
+    /// C-RESULT: 特異な CTM の下で組んだ経路の塗り・クリップは、黙って何も描かないのでなく診断を残す
+    #[test]
+    fn path_under_a_singular_ctm_is_diagnosed() {
+        let out = eval("q 0 0 0 0 5 5 cm 0 0 m 10 0 l 10 10 l f Q 0 0 10 10 re f");
+        let diags: Vec<&str> = out.unsupported().collect();
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(diags[0].contains("singular CTM"));
+        assert_eq!(
+            out.items
+                .iter()
+                .filter(|i| matches!(i, Item::Fill { .. }))
+                .count(),
+            2
+        );
+        // clip も同じ
+        let out = eval("0 0 0 0 0 0 cm 0 0 m 1 0 l 1 1 l W n");
+        assert!(out.unsupported().any(|d| d.contains("singular CTM")));
+    }
+
+    /// C-RESOURCE: 経路の線分数の予算。到達したら一度だけ診断し、残りは落とす
+    #[test]
+    fn path_segment_budget_is_reported_once() {
+        let mut s = String::from("0 0 m ");
+        for i in 0..(MAX_PATH_SEGMENTS + 5) {
+            s.push_str(&format!("{} 0 l ", i % 7));
+        }
+        s.push('f');
+        let out = eval(&s);
+        let diags: Vec<&str> = out.unsupported().collect();
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(diags[0].starts_with("budget: path exceeds"));
+        match &out.items[1] {
+            Item::Fill { path, .. } => assert_eq!(path.segments.len(), MAX_PATH_SEGMENTS),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// C-RESOURCE: クリップの入れ子の予算（q/Q をまたいで数える）
+    #[test]
+    fn clip_nesting_budget_is_reported() {
+        let mut s = String::new();
+        for _ in 0..(MAX_CLIP_DEPTH + 3) {
+            s.push_str("q 0 0 10 10 re W n ");
+        }
+        let out = eval(&s);
+        let diags: Vec<&str> = out.unsupported().collect();
+        assert_eq!(diags.len(), 3, "{diags:?}");
+        assert!(diags.iter().all(|d| d.starts_with("budget: clip nesting")));
+        assert_eq!(
+            out.items
+                .iter()
+                .filter(|i| matches!(i, Item::ClipPush { .. }))
+                .count(),
+            MAX_CLIP_DEPTH
+        );
     }
 }

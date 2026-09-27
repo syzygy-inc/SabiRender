@@ -1,0 +1,9 @@
+[package]
+name = "sabirender-qa"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "契約 case の台帳（テスト専用。品質保証指針 qa-v0）"
+
+[dependencies]

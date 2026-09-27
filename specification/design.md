@@ -76,7 +76,12 @@ ISO 32000-1 §8 の図形モデルに揃える。3D 向けの概念（深度、�
 - ラスタライザ: 非有限の点を含む部分経路は折れ線化で丸ごと落とす（一部の線分だけ描いて形を変えない）。非有限・負の線幅、
   miter limit、破線は描かず `RenderReport.skipped` に残す。曲線分割は深さ 16 で終端する。
 - キャンバス: `Canvas::try_new` が画素数の乗算あふれと上限 `MAX_PIXELS`（2^24）を確保前に検査する。
-- これらの検査は [cases.md](cases.md) の RENDER-CONTENT-NUMERIC / RENDER-NUMERIC / RENDER-CAPACITY に対応する。
+- 予算（到達は成功と区別する）: 内容評価器はフォーム再帰 `MAX_FORM_DEPTH`（16）、経路の線分数 `MAX_PATH_SEGMENTS`（2^20）、
+  クリップの入れ子 `MAX_CLIP_DEPTH`（256）に達すると `budget:` で始まる `Item::Unsupported` を残して打ち切る。
+  ラスタライザは曲線の二分の深さ `flatten::MAX_DEPTH`（16）に達した曲線の数を `RenderReport.budget` に残す
+  （描くが平坦さは保証しない）。SabiDVI はこれらを `unsupported` として利用側に渡す。
+- 特異な CTM の下で組んだ経路の塗り・クリップは何も描かないが、黙って通さず診断を残す。
+- これらの検査は [cases.md](cases.md) の RENDER-CONTENT-NUMERIC / RENDER-NUMERIC / RENDER-CAPACITY / RENDER-BUDGET に対応する。
 
 ## 今後
 

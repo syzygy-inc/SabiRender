@@ -500,3 +500,43 @@ fn canvas_size_is_checked_before_allocation() {
     assert!(Canvas::try_new(usize::MAX, 2).is_none());
     assert!(Canvas::try_new(0, 0).is_some());
 }
+
+#[test]
+fn an_extreme_curve_reports_the_subdivision_budget() {
+    // 制御点が 1e13 画素先にある曲線: 二分ごとに逸脱は 1/4 になるので、深さ 16 では 1e13 / 4^16 ≈ 2300 画素残り、0.05 画素の平坦さに届かない
+    let wild = Path {
+        segments: vec![
+            Segment::MoveTo(1.0, 1.0),
+            Segment::CurveTo(1e13, 1.0, 1.0, 1e13, 9.0, 9.0),
+            Segment::Close,
+        ],
+    };
+    let mut canvas = Canvas::new(10, 10);
+    let report = render(
+        &DisplayList {
+            items: vec![
+                fill(wild.clone(), FillRule::NonZero),
+                stroke(wild, StrokeStyle::default()),
+            ],
+        },
+        &mut canvas,
+        &Matrix::IDENTITY,
+    );
+    assert_eq!(report.budget.len(), 1, "{:?}", report.budget);
+    assert!(
+        report.budget[0].contains("2 curve(s)"),
+        "{:?}",
+        report.budget
+    );
+    assert!(report.skipped.is_empty());
+    // 普通の円は予算に届かない
+    let mut canvas = Canvas::new(200, 200);
+    let report = render(
+        &DisplayList {
+            items: vec![fill(circle(100.0, 100.0, 40.0), FillRule::NonZero)],
+        },
+        &mut canvas,
+        &Matrix::IDENTITY,
+    );
+    assert!(report.budget.is_empty());
+}

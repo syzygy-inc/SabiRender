@@ -7,3 +7,7 @@ repository.workspace = true
 
 [dependencies]
 sabirender-display = { path = "../sabirender-display" }
+
+[dev-dependencies]
+sabirender-content = { path = "../sabirender-content" }
+sabirender-qa = { path = "../sabirender-qa" }

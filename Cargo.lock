@@ -14,10 +14,16 @@ name = "sabirender-display"
 version = "0.0.1"
 
 [[package]]
+name = "sabirender-qa"
+version = "0.0.1"
+
+[[package]]
 name = "sabirender-raster"
 version = "0.0.1"
 dependencies = [
+ "sabirender-content",
  "sabirender-display",
+ "sabirender-qa",
 ]
 
 [[package]]

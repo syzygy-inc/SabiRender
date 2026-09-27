@@ -21,6 +21,34 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Test
+      - name: Test (no reference renderer: the oracle case must be BLOCKED, never PASS)
+        run: |
+          rm -rf target/qa-ledger
+          cargo test --workspace
+          ! grep -q "PASS" target/qa-ledger/*.tsv
+      - name: Strict must fail without the reference renderer
+        env:
+          SABI_STRICT_TESTS: "1"
+        run: |
+          if cargo test -p sabirender-raster --test oracle; then echo "strict passed without pdftoppm"; exit 1; fi
 
-        run: cargo test --workspace
+  oracle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the reference renderer (poppler)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils
+          pdftoppm -v 2>&1 | head -n 1
+      - name: Test (strict)
+        env:
+          SABI_STRICT_TESTS: "1"
+        run: |
+          rm -rf target/qa-ledger
+          cargo test --workspace -- --nocapture 2>&1 | grep -E "RENDER-IMAGE|test result" || true
+          cargo test --workspace
+      - name: Ledger (all planned cases PASS with their comparisons)
+        run: sh scripts/qa-ledger.sh

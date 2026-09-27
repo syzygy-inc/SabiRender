@@ -102,7 +102,14 @@ pub type Polygons = Vec<Vec<(f64, f64)>>;
 
 /// 経路を装置空間の多角形に折れ線化する。開いた部分経路も塗りのために閉じる
 pub fn flatten_path(path: &Path, to_device: &Matrix) -> Polygons {
-    flatten::flatten(&path.transform(to_device), FLATNESS)
+    flatten::flatten(&path.transform(to_device), FLATNESS).0
+}
+
+/// 同上。曲線の分割の深さの予算に達した数を `hits` に足す（描画の報告用）
+fn flatten_counted(path: &Path, to_device: &Matrix, hits: &mut usize) -> Polygons {
+    let (polys, h) = flatten::flatten(&path.transform(to_device), FLATNESS);
+    *hits += h;
+    polys
 }
 
 struct Edge {
@@ -306,6 +313,8 @@ pub fn render(list: &DisplayList, canvas: &mut Canvas, page_to_device: &Matrix) 
     // クリップは装置空間の多角形として積み、塗るたびに交叉を取る
     let mut clips: Vec<(Polygons, FillRule)> = Vec::new();
     let mut report = RenderReport::default();
+    // 曲線の分割の深さの予算に達した回数（到達は成功と区別して報告する）
+    let mut depth_hits = 0usize;
     let paint = |canvas: &mut Canvas,
                  polys: &Polygons,
                  rule: FillRule,
@@ -332,7 +341,7 @@ pub fn render(list: &DisplayList, canvas: &mut Canvas, page_to_device: &Matrix) 
                 let dev = ctm.then(page_to_device);
                 paint(
                     canvas,
-                    &flatten_path(path, &dev),
+                    &flatten_counted(path, &dev, &mut depth_hits),
                     *rule,
                     &clips,
                     color.to_rgb(),
@@ -357,7 +366,8 @@ pub fn render(list: &DisplayList, canvas: &mut Canvas, page_to_device: &Matrix) 
                     continue;
                 }
                 let dev = ctm.then(page_to_device);
-                let polys = stroke::stroke_to_polygons(path, style, &dev, FLATNESS);
+                let (polys, hits) = stroke::stroke_to_polygons(path, style, &dev, FLATNESS);
+                depth_hits += hits;
                 paint(
                     canvas,
                     &polys,
@@ -369,7 +379,7 @@ pub fn render(list: &DisplayList, canvas: &mut Canvas, page_to_device: &Matrix) 
             }
             Item::ClipPush { path, ctm, rule } => {
                 let dev = ctm.then(page_to_device);
-                clips.push((flatten_path(path, &dev), *rule));
+                clips.push((flatten_counted(path, &dev, &mut depth_hits), *rule));
             }
             Item::ClipPop => {
                 clips.pop();
@@ -383,7 +393,11 @@ pub fn render(list: &DisplayList, canvas: &mut Canvas, page_to_device: &Matrix) 
                 let dev = ctm.then(page_to_device);
                 let mut polys = Vec::new();
                 for g in &run.glyphs {
-                    polys.extend(flatten_path(&g.outline, &g.transform.then(&dev)));
+                    polys.extend(flatten_counted(
+                        &g.outline,
+                        &g.transform.then(&dev),
+                        &mut depth_hits,
+                    ));
                 }
                 paint(
                     canvas,
@@ -398,6 +412,12 @@ pub fn render(list: &DisplayList, canvas: &mut Canvas, page_to_device: &Matrix) 
             Item::Unsupported { what } => report.skipped.push(what.clone()),
         }
     }
+    if depth_hits > 0 {
+        report.budget.push(format!(
+            "budget: curve subdivision depth {} reached for {depth_hits} curve(s); flatness not guaranteed there",
+            flatten::MAX_DEPTH
+        ));
+    }
     report
 }
 
@@ -405,6 +425,8 @@ pub fn render(list: &DisplayList, canvas: &mut Canvas, page_to_device: &Matrix) 
 pub struct RenderReport {
     /// 描かなかった項目
     pub skipped: Vec<String>,
+    /// 予算に達した箇所（描いたが精度を保証しない。成功と区別する。C-RESOURCE）
+    pub budget: Vec<String>,
 }
 
 fn composite(canvas: &mut Canvas, mask: &Mask, rgb: (f64, f64, f64), alpha: f64) {

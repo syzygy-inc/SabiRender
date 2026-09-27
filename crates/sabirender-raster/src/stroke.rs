@@ -11,11 +11,11 @@ pub fn stroke_to_polygons(
     style: &StrokeStyle,
     to_device: &Matrix,
     tolerance: f64,
-) -> Vec<Vec<(f64, f64)>> {
+) -> (Vec<Vec<(f64, f64)>>, usize) {
     // 折れ線化は装置空間の許容誤差で行いたいので、利用者空間の許容誤差に換算する
     let scale = to_device.mean_scale().max(1e-9);
     let user_tol = tolerance / scale;
-    let mut lines = flatten_open(path, user_tol);
+    let (mut lines, depth_hits) = flatten_open(path, user_tol);
     if !style.dash.is_empty() {
         lines = apply_dash(&lines, &style.dash, style.dash_phase);
     }
@@ -71,7 +71,8 @@ pub fn stroke_to_polygons(
         }
     }
     // 装置空間へ。向きを反時計回り（装置空間で符号付き面積が正）に揃える
-    out.into_iter()
+    let polys: Vec<Vec<(f64, f64)>> = out
+        .into_iter()
         .map(|poly| {
             let mut p: Vec<(f64, f64)> = poly
                 .into_iter()
@@ -83,7 +84,8 @@ pub fn stroke_to_polygons(
             p
         })
         .filter(|p| p.len() >= 3)
-        .collect()
+        .collect();
+    (polys, depth_hits)
 }
 
 fn dedup(points: &[(f64, f64)]) -> Vec<(f64, f64)> {

@@ -2,15 +2,20 @@
 
 use sabirender_display::{Path, Segment};
 
-/// 経路を多角形の列に折れ線化する。開いた部分経路も閉じる（塗り用）
-pub fn flatten(path: &Path, tolerance: f64) -> Vec<Vec<(f64, f64)>> {
+/// 曲線の二分の深さの上限（予算）。到達した回数は呼び出し側に返し、描画の報告に残す
+pub const MAX_DEPTH: u32 = 16;
+
+/// 経路を多角形の列に折れ線化する。開いた部分経路も閉じる（塗り用）。
+/// 2 つ目は分割の深さの予算に達した曲線の数
+pub fn flatten(path: &Path, tolerance: f64) -> (Vec<Vec<(f64, f64)>>, usize) {
     let mut polys = Vec::new();
-    for line in flatten_open(path, tolerance) {
+    let (lines, hits) = flatten_open(path, tolerance);
+    for line in lines {
         if line.points.len() >= 2 {
             polys.push(line.points);
         }
     }
-    polys
+    (polys, hits)
 }
 
 /// 折れ線化した部分経路（閉じたかどうかを保持。線の描画用）
@@ -20,8 +25,9 @@ pub struct Polyline {
     pub closed: bool,
 }
 
-pub fn flatten_open(path: &Path, tolerance: f64) -> Vec<Polyline> {
+pub fn flatten_open(path: &Path, tolerance: f64) -> (Vec<Polyline>, usize) {
     let mut out: Vec<Polyline> = Vec::new();
+    let mut hits = 0usize;
     let mut cur: Option<Polyline> = None;
     let mut last = (0.0, 0.0);
     for s in &path.segments {
@@ -49,7 +55,7 @@ pub fn flatten_open(path: &Path, tolerance: f64) -> Vec<Polyline> {
                     points: vec![last],
                     closed: false,
                 });
-                cubic(
+                if cubic(
                     last,
                     (x1, y1),
                     (x2, y2),
@@ -57,7 +63,9 @@ pub fn flatten_open(path: &Path, tolerance: f64) -> Vec<Polyline> {
                     tolerance,
                     &mut c.points,
                     0,
-                );
+                ) {
+                    hits += 1;
+                }
                 last = (x3, y3);
             }
             Segment::Close => {
@@ -76,7 +84,7 @@ pub fn flatten_open(path: &Path, tolerance: f64) -> Vec<Polyline> {
     }
     // 非有限の点を含む部分経路は丸ごと落とす（一部の線分だけ描いて形を変えない）
     out.retain(|l| l.points.iter().all(|(x, y)| x.is_finite() && y.is_finite()));
-    out
+    (out, hits)
 }
 
 fn cubic(
@@ -87,7 +95,7 @@ fn cubic(
     tol: f64,
     out: &mut Vec<(f64, f64)>,
     depth: u32,
-) {
+) -> bool {
     // 制御点が弦からどれだけ離れているか（Roger Willcocks の平坦さ判定の簡略形）
     let dx = p3.0 - p0.0;
     let dy = p3.1 - p0.1;
@@ -102,9 +110,10 @@ fn cubic(
     } else {
         dd <= tol * tol * (dx * dx + dy * dy)
     };
-    if flat || depth >= 16 {
+    // 返り値: 深さの予算に達して平坦でないまま打ち切った（曲線 1 本につき 1 回数える）
+    if flat || depth >= MAX_DEPTH {
         out.push(p3);
-        return;
+        return !flat;
     }
     // de Casteljau で二分
     let m = |a: (f64, f64), b: (f64, f64)| ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
@@ -114,8 +123,9 @@ fn cubic(
     let p012 = m(p01, p12);
     let p123 = m(p12, p23);
     let mid = m(p012, p123);
-    cubic(p0, p01, p012, mid, tol, out, depth + 1);
-    cubic(mid, p123, p23, p3, tol, out, depth + 1);
+    let a = cubic(p0, p01, p012, mid, tol, out, depth + 1);
+    let b = cubic(mid, p123, p23, p3, tol, out, depth + 1);
+    a || b
 }
 
 #[cfg(test)]
@@ -132,8 +142,9 @@ mod tests {
                 Segment::CurveTo(100.0, 100.0 * k, 100.0 * k, 100.0, 0.0, 100.0),
             ],
         };
-        let lines = flatten_open(&path, 0.01);
+        let (lines, hits) = flatten_open(&path, 0.01);
         assert_eq!(lines.len(), 1);
+        assert_eq!(hits, 0);
         assert!(lines[0].points.len() > 8);
         for (x, y) in &lines[0].points {
             let r = x.hypot(*y);
