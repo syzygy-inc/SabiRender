@@ -21,7 +21,7 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Test (no reference renderer: the oracle case must be BLOCKED, never PASS)
+      - name: Test without the reference renderer (the oracle case must be BLOCKED, never PASS)
         run: |
           rm -rf target/qa-ledger
           cargo test --workspace
