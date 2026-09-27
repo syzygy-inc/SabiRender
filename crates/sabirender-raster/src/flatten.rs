@@ -74,6 +74,8 @@ pub fn flatten_open(path: &Path, tolerance: f64) -> Vec<Polyline> {
     if let Some(c) = cur.take() {
         out.push(c);
     }
+    // 非有限の点を含む部分経路は丸ごと落とす（一部の線分だけ描いて形を変えない）
+    out.retain(|l| l.points.iter().all(|(x, y)| x.is_finite() && y.is_finite()));
     out
 }
 

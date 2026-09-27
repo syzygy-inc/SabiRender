@@ -31,13 +31,26 @@ pub struct Canvas {
     pub pixels: Vec<[f64; 4]>,
 }
 
+/// キャンバスの画素数の上限（f64 RGBA で 1 画素 32 バイト。16M 画素 = 512 MB）
+pub const MAX_PIXELS: usize = 1 << 24;
+
 impl Canvas {
-    pub fn new(width: usize, height: usize) -> Canvas {
-        Canvas {
+    /// 上限を超える大きさは panic ではなく None（C-RESOURCE）。確保の前に検査する
+    pub fn try_new(width: usize, height: usize) -> Option<Canvas> {
+        let n = width.checked_mul(height)?;
+        if n > MAX_PIXELS {
+            return None;
+        }
+        Some(Canvas {
             width,
             height,
-            pixels: vec![[0.0, 0.0, 0.0, 0.0]; width * height],
-        }
+            pixels: vec![[0.0, 0.0, 0.0, 0.0]; n],
+        })
+    }
+
+    /// 上限内であること（`MAX_PIXELS`）を呼び出し側が保証する場合
+    pub fn new(width: usize, height: usize) -> Canvas {
+        Canvas::try_new(width, height).expect("canvas size exceeds MAX_PIXELS")
     }
 
     pub fn filled(width: usize, height: usize, rgba: [f64; 4]) -> Canvas {
@@ -111,7 +124,8 @@ fn edge_set(polys: &Polygons, rule: FillRule) -> EdgeSet {
     let mut edges = Vec::new();
     for poly in polys {
         let n = poly.len();
-        if n < 2 {
+        // 非有限の座標を含む多角形は描かない（交点の並べ替えで NaN を比べないため）
+        if n < 2 || poly.iter().any(|(x, y)| !x.is_finite() || !y.is_finite()) {
             continue;
         }
         for i in 0..n {
@@ -332,6 +346,16 @@ pub fn render(list: &DisplayList, canvas: &mut Canvas, page_to_device: &Matrix) 
                 color,
                 alpha,
             } => {
+                if !style.width.is_finite()
+                    || !style.miter_limit.is_finite()
+                    || style.dash.iter().any(|d| !d.is_finite() || *d < 0.0)
+                    || !style.dash_phase.is_finite()
+                {
+                    report
+                        .skipped
+                        .push("stroke with a non-finite or negative style value".into());
+                    continue;
+                }
                 let dev = ctm.then(page_to_device);
                 let polys = stroke::stroke_to_polygons(path, style, &dev, FLATNESS);
                 paint(

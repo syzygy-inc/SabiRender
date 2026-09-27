@@ -158,6 +158,13 @@ impl<'r> Evaluator<'r> {
                 }
             })
             .collect();
+        // 非有限の被演算子（NaN、無限大）は黙って 0 に置き換えず、診断を残して演算子ごと無視する（C-DRAW）
+        if nums.iter().any(|v| !v.is_finite()) {
+            out.push(Item::Unsupported {
+                what: format!("non-finite operand for {op}"),
+            });
+            return;
+        }
         let n = |i: usize| nums.get(i).copied().unwrap_or(0.0);
         // 演算子は末尾の数を取る（余分な先頭の被演算子は無視する）
         let tail = |k: usize| -> Vec<f64> {
@@ -424,10 +431,16 @@ impl<'r> Evaluator<'r> {
             });
         }
         if stroke && !path.is_empty() {
-            // 線は塗り時点の CTM の利用者空間で太らせる。CTM が退化していれば太らせようがないのでページ空間のまま
+            // 線は塗り時点の CTM の利用者空間で太らせる。CTM が退化していれば太らせようがない:
+            // ページ空間のまま出すが、黙って置き換えずに診断を残す（C-DRAW）
             let (path_user, ctm) = match self.state.ctm.invert() {
                 Some(inv) => (path.transform(&inv), self.state.ctm),
-                None => (path.clone(), Matrix::IDENTITY),
+                None => {
+                    out.push(Item::Unsupported {
+                        what: "stroke under a singular CTM (drawn in page space)".into(),
+                    });
+                    (path.clone(), Matrix::IDENTITY)
+                }
             };
             out.push(Item::Stroke {
                 path: path_user,
@@ -627,6 +640,33 @@ mod tests {
         ));
         let unsupported: Vec<&str> = dl.unsupported().collect();
         assert_eq!(unsupported, ["sh", "text operator BT", "text operator ET"]);
+    }
+
+    #[test]
+    fn non_finite_operands_are_diagnosed_not_drawn() {
+        // PDF に NaN / 無限大の字句は無いが、桁あふれで無限大になり得る（1 の後に 0 が 400 個）
+        let huge = format!("1{}", "0".repeat(400));
+        let dl = eval(&format!(
+            "0 0 m {huge} 1 l 10 0 l S 1 0 0 {huge} 0 0 cm 0 0 5 5 re f"
+        ));
+        let unsupported: Vec<&str> = dl.unsupported().collect();
+        assert_eq!(
+            unsupported,
+            ["non-finite operand for l", "non-finite operand for cm"]
+        );
+        // 無限大の l は無視され、線は (0,0)-(10,0)。cm も無視されて塗りは (0,0)-(5,5)。診断が各演算子の前に入る
+        assert_eq!(points(&dl.items[1]), vec![(0.0, 0.0), (10.0, 0.0)]);
+        assert_eq!(
+            points(&dl.items[3]),
+            vec![(0.0, 0.0), (5.0, 0.0), (5.0, 5.0), (0.0, 5.0)]
+        );
+    }
+
+    #[test]
+    fn stroke_under_a_singular_ctm_is_diagnosed() {
+        let dl = eval("0 0 0 0 0 0 cm 0 0 m 1 1 l S");
+        assert!(matches!(dl.items[0], Item::Unsupported { .. }));
+        assert!(matches!(dl.items[1], Item::Stroke { ctm, .. } if ctm == Matrix::IDENTITY));
     }
 
     #[test]

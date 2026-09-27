@@ -382,3 +382,121 @@ fn glyphs_are_placed_by_their_own_transform() {
     assert!(canvas.pixels[25 * 200 + 65][3] > 0.99);
     assert!(canvas.pixels[25 * 200 + 55][3] < 0.01);
 }
+
+// ---- 位置と局所画素（面積だけでは位置・形の一致を代替しない）----
+
+#[test]
+fn fractional_rectangle_edges_have_exact_partial_coverage() {
+    // x 10.25〜40.75、y 20.5〜35.75 の矩形: 端の画素の被覆率は端数そのもの
+    let mut canvas = Canvas::new(60, 60);
+    let list = DisplayList {
+        items: vec![fill(
+            Path::rect(10.25, 20.5, 30.5, 15.25),
+            FillRule::NonZero,
+        )],
+    };
+    render(&list, &mut canvas, &Matrix::IDENTITY);
+    let px = |x: usize, y: usize| canvas.pixels[y * 60 + x][3];
+    assert!((px(10, 25) - 0.75).abs() < 1e-9, "left edge {}", px(10, 25));
+    assert!(
+        (px(40, 25) - 0.75).abs() < 1e-9,
+        "right edge {}",
+        px(40, 25)
+    );
+    assert!(
+        (px(25, 20) - 0.5).abs() < 1e-9,
+        "bottom edge {}",
+        px(25, 20)
+    );
+    assert!((px(25, 35) - 0.75).abs() < 1e-9, "top edge {}", px(25, 35));
+    assert!((px(10, 20) - 0.375).abs() < 1e-9, "corner {}", px(10, 20));
+    assert!((px(25, 25) - 1.0).abs() < 1e-12);
+    assert!(px(9, 25).abs() < 1e-12 && px(41, 25).abs() < 1e-12);
+    assert!(px(25, 19).abs() < 1e-12 && px(25, 36).abs() < 1e-12);
+}
+
+#[test]
+fn circle_is_where_it_should_be() {
+    let mut canvas = Canvas::new(200, 200);
+    let list = DisplayList {
+        items: vec![fill(circle(100.0, 100.0, 40.0), FillRule::NonZero)],
+    };
+    render(&list, &mut canvas, &Matrix::IDENTITY);
+    let px = |x: usize, y: usize| canvas.pixels[y * 200 + x][3];
+    assert!(px(100, 100) > 0.999);
+    assert!(
+        px(100, 62) > 0.999 && px(100, 137) > 0.999 && px(62, 100) > 0.999 && px(137, 100) > 0.999
+    );
+    assert!(px(100, 58) < 0.001 && px(141, 100) < 0.001);
+    // 45° の方向: 画素 (127,127) の中心は中心から 27.5√2 = 38.9 で中、(130,130) は 30.5√2 = 43.1 で外
+    assert!(px(127, 127) > 0.999 && px(130, 130) < 0.001);
+    assert!(px(20, 20).abs() < 1e-12 && px(180, 180).abs() < 1e-12);
+}
+
+#[test]
+fn page_to_device_places_the_bottom_left_origin_at_the_last_row() {
+    // ページ空間 (0,0)-(10,10) の矩形は、高さ 100 の紙面を 72dpi で描くと下端の 10 行
+    let mut canvas = Canvas::new(20, 100);
+    let list = DisplayList {
+        items: vec![fill(Path::rect(0.0, 0.0, 10.0, 10.0), FillRule::NonZero)],
+    };
+    render(
+        &list,
+        &mut canvas,
+        &sabirender_raster::page_to_device(100.0, 72.0),
+    );
+    let px = |x: usize, y: usize| canvas.pixels[y * 20 + x][3];
+    assert!(px(5, 95) > 0.999 && px(5, 89) < 0.001 && px(15, 95) < 0.001);
+}
+
+// ---- 異常な数値と容量（C-RESOURCE）----
+
+#[test]
+fn non_finite_geometry_is_skipped_without_panicking() {
+    let mut canvas = Canvas::new(10, 10);
+    let nan_path = Path {
+        segments: vec![
+            Segment::MoveTo(f64::NAN, 0.0),
+            Segment::LineTo(5.0, 5.0),
+            Segment::LineTo(0.0, 5.0),
+            Segment::Close,
+        ],
+    };
+    let items = vec![
+        fill(nan_path.clone(), FillRule::NonZero),
+        stroke(nan_path, StrokeStyle::default()),
+        stroke(
+            Path::rect(1.0, 1.0, 5.0, 5.0),
+            StrokeStyle {
+                width: f64::INFINITY,
+                ..Default::default()
+            },
+        ),
+        stroke(
+            Path::rect(1.0, 1.0, 5.0, 5.0),
+            StrokeStyle {
+                width: 1.0,
+                dash: vec![f64::NAN],
+                ..Default::default()
+            },
+        ),
+        Item::Fill {
+            path: Path::rect(1.0, 1.0, 5.0, 5.0),
+            ctm: Matrix::new(f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0),
+            rule: FillRule::NonZero,
+            color: Color::BLACK,
+            alpha: 1.0,
+        },
+    ];
+    let report = render(&DisplayList { items }, &mut canvas, &Matrix::IDENTITY);
+    assert!(canvas.coverage_sum().abs() < 1e-12, "nothing drawable");
+    assert_eq!(report.skipped.len(), 2, "{:?}", report.skipped);
+}
+
+#[test]
+fn canvas_size_is_checked_before_allocation() {
+    assert!(Canvas::try_new(4096, 4096).is_some());
+    assert!(Canvas::try_new(4097, 4096).is_none());
+    assert!(Canvas::try_new(usize::MAX, 2).is_none());
+    assert!(Canvas::try_new(0, 0).is_some());
+}
